@@ -1,0 +1,285 @@
+#!/bin/bash
+
+# aicmd - AI 命令行提示工具
+# 支持 Linux 和 macOS
+
+set -e
+
+# 配置文件路径
+CONFIG_FILE="${HOME}/.aicmd/config"
+
+# 默认 API 配置
+DEFAULT_API_URL="http://127.0.0.1:7888/proxy/direct/aigc/chat/completions"
+DEFAULT_API_KEY="sk-aicmd"
+DEFAULT_MODEL="deepseek-chat"
+
+# 检测操作系统类型
+OS_TYPE=$(uname -s)
+case "$OS_TYPE" in
+    Linux)
+        OS_NAME="Linux"
+        ;;
+    Darwin)
+        OS_NAME="macOS"
+        ;;
+    *)
+        OS_NAME="$OS_TYPE"
+        ;;
+esac
+
+# 检测 shell 类型
+SHELL_NAME=$(basename "$SHELL")
+
+# 显示帮助信息
+show_help() {
+    cat << 'EOF'
+Usage: aicmd [选项] [描述]
+       cat file | aicmd [选项] [描述]
+
+AI 命令行提示工具 - 根据描述生成命令或解答问题
+
+选项:
+    -c          聊天/解答模式，直接输出答案，不生成命令
+    -h, --help  显示帮助信息
+
+示例:
+    aicmd "查看当前系统时间"
+    aicmd "查找占用 8080 端口的进程"
+    aicmd -c "如何优化 MySQL 查询性能"
+    cat error.log | aicmd -c "分析这个错误日志"
+
+配置:
+    在 ~/.config/aicmd/config 中配置 API 信息:
+    API_KEY=your_api_key
+    API_URL=https://api.openai.com/v1/chat/completions
+    MODEL=gpt-3.5-turbo
+EOF
+}
+
+# 读取配置文件
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+
+    # 使用环境变量或默认值
+    API_KEY="${AICMD_API_KEY:-${API_KEY:-$DEFAULT_API_KEY}}"
+    API_URL="${AICMD_API_URL:-${API_URL:-$DEFAULT_API_URL}}"
+    MODEL="${AICMD_MODEL:-${MODEL:-$DEFAULT_MODEL}}"
+}
+
+# 检查 API 密钥
+check_api_key() {
+    if [[ -z "$API_KEY" ]]; then
+        echo "错误: 未设置 API 密钥" >&2
+        echo "请设置环境变量 AICMD_API_KEY 或在 ~/.config/aicmd/config 中配置" >&2
+        echo "" >&2
+        echo "配置文件示例:" >&2
+        echo "  mkdir -p ~/.config/aicmd" >&2
+        echo "  echo 'API_KEY=your_api_key' > ~/.config/aicmd/config" >&2
+        exit 1
+    fi
+}
+
+# 调用大模型 API
+call_api() {
+    local system_prompt="$1"
+    local user_prompt="$2"
+
+    # 构建请求体
+    local request_body
+    request_body=$(cat <<EOF
+{
+    "model": "$MODEL",
+    "messages": [
+        {"role": "system", "content": "$system_prompt"},
+        {"role": "user", "content": "$user_prompt"}
+    ],
+    "temperature": 0.3,
+    "stream": false
+}
+EOF
+)
+
+    # 调用 API
+    local response
+    if ! response=$(curl -s -X POST "$API_URL" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" \
+        -d "$request_body" 2>/dev/null); then
+        echo "错误: API 请求失败" >&2
+        exit 1
+    fi
+    # 检查 API 错误
+    if echo "$response" | grep -q '"error"'; then
+        local error_msg
+        error_msg=$(echo "$response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4)
+        echo "API 错误: ${error_msg:-$response}" >&2
+        exit 1
+    fi
+
+    # 提取回复内容
+    local content
+    content=$(echo "$response" | grep -o '"content":"[^"]*"' | head -1 | sed 's/"content":"//;s/"$//')
+
+    # 如果没有匹配到，尝试另一种方式提取
+    if [[ -z "$content" ]]; then
+        content=$(echo "$response" | sed -n 's/.*"content": "\([^"]*\)".*/\1/p' | head -1)
+    fi
+
+    # 处理转义字符
+    content=$(echo -e "$content" | sed 's/\\n/\n/g; s/\\t/\t/g; s/\\"/"/g')
+
+    echo "$content"
+}
+
+# 生成命令模式
+generate_command() {
+    local description="$1"
+    local stdin_content="$2"
+
+    local system_prompt="你是一个命令行专家。用户当前使用的是 $OS_NAME 操作系统，$SHELL_NAME shell。根据用户的描述生成最适合当前环境的 shell 命令。只输出命令本身，不要有任何解释、注释或 markdown 格式。命令应该简洁、安全且可执行。"
+
+    local user_prompt
+    if [[ -n "$stdin_content" ]]; then
+        user_prompt="描述: $description\n\n输入内容:\n$stdin_content\n\n请生成处理上述内容的命令:"
+    else
+        user_prompt="描述: $description"
+    fi
+
+    call_api "$system_prompt" "$user_prompt"
+}
+
+# 解释命令模式
+explain_command() {
+    local command="$1"
+
+    local system_prompt="你是一个命令行专家。用户当前使用的是 $OS_NAME 操作系统，$SHELL_NAME shell。解释给定的 shell 命令，包括每个参数的含义、命令的作用以及使用注意事项。用中文回答。禁止使用任何 markdown 格式（如代码块、加粗、列表等），使用纯文本格式输出，确保内容直观易读。"
+
+    local user_prompt="请解释以下命令:\n\n$command"
+
+    call_api "$system_prompt" "$user_prompt"
+}
+
+# 聊天/解答模式
+chat_mode() {
+    local question="$1"
+    local stdin_content="$2"
+
+    local system_prompt="你是一个 helpful 的助手。用户当前使用的是 $OS_NAME 操作系统，$SHELL_NAME shell。请简洁、准确地回答用户的问题。用中文回答。禁止使用任何 markdown 格式（如代码块、加粗、列表、标题等），使用纯文本格式输出，确保内容直观易读。"
+
+    local user_prompt
+    if [[ -n "$stdin_content" ]]; then
+        user_prompt="问题: $question\n\n输入内容:\n$stdin_content"
+    else
+        user_prompt="$question"
+    fi
+
+    call_api "$system_prompt" "$user_prompt"
+}
+
+# 颜色定义
+RED='\033[31m'
+RESET='\033[0m'
+
+# 主函数
+main() {
+    local chat_mode_flag=false
+    local description=""
+
+    # 解析参数
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c)
+                chat_mode_flag=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -*)
+                echo "未知选项: $1" >&2
+                echo "使用 -h 或 --help 查看帮助" >&2
+                exit 1
+                ;;
+            *)
+                description="$description $1"
+                shift
+                ;;
+        esac
+    done
+
+    # 去除开头空格
+    description=$(echo "$description" | sed 's/^ *//')
+
+    # 读取管道输入
+    local stdin_content=""
+    if [[ ! -t 0 ]]; then
+        stdin_content=$(cat)
+    fi
+
+    # 检查是否有输入
+    if [[ -z "$description" && -z "$stdin_content" ]]; then
+        echo "错误: 请提供描述或使用管道输入" >&2
+        echo "使用 -h 或 --help 查看帮助" >&2
+        exit 1
+    fi
+
+    # 加载配置
+    load_config
+    check_api_key
+
+    # 聊天模式
+    if [[ "$chat_mode_flag" == true ]]; then
+        chat_mode "$description" "$stdin_content"
+        exit 0
+    fi
+
+    # 命令生成模式
+    # echo "正在生成命令..."
+    local generated_command
+    generated_command=$(generate_command "$description" "$stdin_content")
+
+    if [[ -z "$generated_command" ]]; then
+        echo "错误: 无法生成命令" >&2
+        exit 1
+    fi
+
+    # echo ""
+    # echo "生成的命令:"
+    echo -e "  ${RED}$generated_command${RESET}"
+    # echo ""
+
+    # 循环处理用户选择
+    while true; do
+        read -p "执行命令? [回车/e-执行/d-解释/q-退出]: " choice
+
+        # 默认空输入为执行
+        if [[ -z "$choice" ]]; then
+            choice="e"
+        fi
+
+        case "$choice" in
+            e|E|exec|EXEC)
+                echo ""
+                eval "$generated_command"
+                break
+                ;;
+            d|D)
+                explain_command "$generated_command"
+                echo -e "  ${RED}$generated_command${RESET}"
+                break
+                ;;
+            q|Q|quit|QUIT)
+                exit 0
+                ;;
+            *)
+                echo "无效选项，请重新选择"
+                exit 0
+                ;;
+        esac
+    done
+}
+
+main "$@"

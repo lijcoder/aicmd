@@ -1,0 +1,32 @@
+# Cross 交叉编译配置
+# 安装: cargo install cross
+# 使用: cross build --target <target>
+
+[build]
+# 默认使用预构建镜像
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:latest"
+
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:latest"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:latest"
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:latest"
+
+[target.x86_64-apple-darwin]
+# macOS 需要使用 osxcross，需要手动配置
+# 或者使用 github actions 在 macOS runner 上编译
+
+[target.aarch64-apple-darwin]
+# macOS M 芯片需要使用 osxcross，需要手动配置
+# 或者使用 github actions 在 macOS runner 上编译
+
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:latest"
+
+[target.i686-pc-windows-gnu]
+image = "ghcr.io/cross-rs/i686-pc-windows-gnu:latest"
